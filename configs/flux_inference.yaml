@@ -127,8 +127,8 @@ trainer:
     warmup_steps: 2000
 
     # AdamW Optimizer Settings
-    max_lr: 0.0001 # Maximum learning rate for AdamW optimizer
-    min_lr: 0.00001 # Minimum learning rate for cosine decay schedule
+    adam_max_lr: 0.0001 # Maximum learning rate for AdamW optimizer
+    min_lr_ratio: 0.1 # Minimum learning rate for cosine decay schedule
     weight_decay: 0.0 # L2 regularization weight decay coefficient
     adam_betas: [ 0.9, 0.95 ] # Beta coefficients for AdamW momentum terms [beta1, beta2]
 

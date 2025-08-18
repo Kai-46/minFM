@@ -23,12 +23,35 @@ class BaseTrainerParams(BaseParams):
     """Base parameters for all trainers - contains common training configuration."""
 
     # Learning rate and optimizer settings
-    max_lr: float = 0.0001
-    min_lr: float = 0.00001
+    # AdamW
+    adam_max_lr: float = 0.0003
+    adam_betas: tuple[float, float] = field(default_factory=lambda: (0.9, 0.95))
+    # Muon
+    use_muon: bool = False
+    muon_max_lr: float = 0.02
+    muon_mu: float = 0.95
+    muon_adjust_lr: str = "spectral_norm"
+    muon_param_patterns: list[str] = field(
+        default_factory=lambda: [
+            "double_blocks.*.txt_attn.qkv.weight",
+            "double_blocks.*.txt_attn.proj.weight",
+            "double_blocks.*.img_attn.qkv.weight",
+            "double_blocks.*.img_attn.proj.weight",
+            "double_blocks.*.txt_mlp.*.weight",
+            "double_blocks.*.img_mlp.*.weight",
+            "single_blocks.*.linear1.weight",  # Contains qkv and mlp_in
+            "single_blocks.*.linear2.weight",  # Contains proj and mlp_out
+            # Note: Excludes txt_in, img_in, final_layer.linear (input/output projections)
+            # Note: Exclude modulation weights
+            # Note: Excludes all biases by explicitly matching only .weight
+        ]
+    )
+
+    # Shared between AdamW and Muon
+    min_lr_ratio: float = 0.1
     warmup_steps: int = 2000
     max_steps: int = 1_000_000
     weight_decay: float = 0.0
-    adam_betas: tuple[float, float] = field(default_factory=lambda: (0.9, 0.95))
 
     # Gradient accumulation settings
     total_batch_size: int = -1
@@ -91,23 +114,7 @@ def load_config(yaml_path: str | Path) -> dict[str, Any]:
     if config is None:
         config = {}
 
-    # Recursively expand environment variables in all string values
-    def _expand_env_vars(value: Any) -> Any:
-        """Recursively expand $VAR and ${VAR} in strings within nested structures."""
-        if isinstance(value, dict):
-            return {k: _expand_env_vars(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [_expand_env_vars(v) for v in value]
-        if isinstance(value, tuple):
-            return tuple(_expand_env_vars(v) for v in value)
-        if isinstance(value, str):
-            # os.path.expandvars leaves unknown vars unchanged, which is desired
-            return os.path.expandvars(value)
-        return value
-
-    expanded_config = _expand_env_vars(config)
-
-    return cast(dict[str, Any], expanded_config)
+    return cast(dict[str, Any], config)
 
 
 def setup_distributed() -> tuple[torch.device, int, int, int]:

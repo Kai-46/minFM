@@ -36,6 +36,7 @@ dependencies = [
     "knapformer==0.1.1",
     "torch_fidelity==0.4.0-beta",
     "scipy==1.15.3",
+    "dion==0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -65,6 +66,7 @@ dev-dependencies = [
 flash-attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.2/flash_attn-2.8.2+cu12torch2.7cxx11abiTRUE-cp310-cp310-linux_x86_64.whl" }
 knapformer = { git = "https://github.com/Kai-46/KnapFormer.git" }
 torch_fidelity = { git = "https://github.com/toshas/torch-fidelity.git" }
+dion = { git = "https://github.com/Kai-46/dion.git" }
 
 # Ruff Configuration
 [tool.ruff]
