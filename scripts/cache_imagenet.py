@@ -191,7 +191,8 @@ def download_imagenet() -> None:
     parser.add_argument(
         "--base-url",
         type=str,
-        default="https://huggingface.co/datasets/ILSVRC/imagenet-1k/resolve/main/data/",
+        # Newer SHAs use parquet. We need the .tar.gz format dastaset.
+        default="https://huggingface.co/datasets/ILSVRC/imagenet-1k/resolve/1500f8c59b214ce459c0a593fa1c87993aeb7700/data/",
         help="Base URL hosting the tar.gz archives (required for --mode direct). Can also set IMAGENET_BASE_URL.",
     )
     parser.add_argument(
