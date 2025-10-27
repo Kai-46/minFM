@@ -9,7 +9,6 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.optim import AdamW
 
 # Local imports
 from data import DataStreamer
@@ -22,7 +21,7 @@ from utils.ema import copy_params, update_ema
 from utils.fsdp import fwd_only_mode
 from utils.log import TrackingLogger, WandbLogger, get_logger, get_pbar, human_readable_number
 from utils.lr import LinearWarmupCosineDecayScheduler
-from utils.optim import create_parameter_groups
+from utils.optim import create_optimizer
 from utils.prof import Profiler
 
 from . import BaseTrainerParams, setup_distributed, setup_experiment_dirs
@@ -138,11 +137,16 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
 
         # Create optimizer (only for trainable denoiser parameters)
         logger.info("Setting up optimizer...")
-        self.optimizer = AdamW(
-            create_parameter_groups(self.denoiser, self.params.weight_decay),
-            lr=self.params.max_lr,
-            betas=self.params.adam_betas,
-            fused=True,
+        self.optimizer = create_optimizer(
+            model=self.denoiser,
+            use_muon=self.params.use_muon,
+            adam_lr=self.params.adam_max_lr,
+            adam_betas=self.params.adam_betas,
+            muon_param_patterns=self.params.muon_param_patterns,
+            muon_lr=self.params.muon_max_lr,
+            muon_mu=self.params.muon_mu,
+            muon_adjust_lr=self.params.muon_adjust_lr,
+            weight_decay=self.params.weight_decay,
         )
 
         # Create learning rate scheduler
@@ -151,8 +155,7 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
             optimizer=self.optimizer,
             warmup_steps=self.params.warmup_steps,
             total_steps=self.params.max_steps,
-            max_lr=self.params.max_lr,
-            min_lr=self.params.min_lr,
+            min_lr_ratio=self.params.min_lr_ratio,
         )
 
         # Switch to rank-dependent seed
@@ -268,7 +271,7 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
             )
 
         # Optimizer step (only if gradient is healthy)
-        lr = self.scheduler.get_last_lr()[0]
+        lrs = self.scheduler.get_last_lr()  # List of learning rates for each param group
         if not has_bad_grad:
             self.optimizer.step()
             update_ema(self.denoiser, self.ema_denoiser, self.params.ema_decay)
@@ -280,14 +283,21 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
         self.scheduler.step()
 
         # Update tracking logger
-        self.tracking_logger.log(
-            {
-                "has_bad_grad": has_bad_grad,
-                "lr": lr,
-                "grad_norm": grad_norm,
-                "step_duration": time.time() - train_step_tic,
-            }
-        )
+        log_dict = {
+            "has_bad_grad": has_bad_grad,
+            "grad_norm": grad_norm,
+            "step_duration": time.time() - train_step_tic,
+        }
+
+        # Log learning rates for each parameter group
+        if len(lrs) == 1:
+            log_dict["lr"] = lrs[0]
+        else:
+            # Multiple parameter groups - log each separately
+            for i, lr in enumerate(lrs):
+                log_dict[f"lr_{i}"] = lr
+
+        self.tracking_logger.log(log_dict)
 
         if dump_trace:
             trace_path = (
@@ -329,7 +339,7 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
         print_data_summary: bool = False,
         txt_drop_prob: float = 0.1,
     ) -> torch.Tensor:
-        accum_batch_size = 0
+        n_accum_steps = 0
         while True:
             # Get next batch (FMDataContext) - infinite iterator, no StopIteration
             with tracking_logger.log_time("time/data"):
@@ -347,14 +357,20 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
             with tracking_logger.log_time("time/trainable_ops_fwd"):
                 fm_data_context = self.trainable_ops(fm_data_context)
 
+            global_batch_size = self.trainable_ops.global_batch_size
+            if total_batch_size <= 0:
+                target_n_accum_steps = 1
+            else:
+                target_n_accum_steps = (total_batch_size + global_batch_size - 1) // global_batch_size
+
             if not skip_backward:
                 with tracking_logger.log_time("time/trainable_ops_bwd"):
-                    fm_data_context.loss.backward()
+                    (fm_data_context.loss / target_n_accum_steps).backward()
 
             tracking_logger.log({"loss_vec": fm_data_context.loss_vec, "num_tokens": fm_data_context.num_tokens})
 
-            accum_batch_size += self.trainable_ops.global_batch_size
-            if accum_batch_size >= total_batch_size:
+            n_accum_steps += 1
+            if n_accum_steps >= target_n_accum_steps:
                 break
 
     @torch.no_grad()
@@ -396,7 +412,17 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
         # Compute average loss across all batch elements and GPUs
         self.tracking_logger.flush()
         avg_loss = self.tracking_logger["loss_vec", "mean"]
-        avg_lr = self.tracking_logger["lr", "mean"]
+
+        # Handle learning rates (might be single or multiple)
+        lr_metrics = {}
+        if "lr" in self.tracking_logger.stats:
+            lr_metrics["lr"] = self.tracking_logger["lr", "mean"]
+        else:
+            # Multiple learning rates
+            for key in self.tracking_logger.stats:
+                if key.startswith("lr_"):
+                    lr_metrics[key] = self.tracking_logger[key, "mean"]
+
         max_grad_norm = self.tracking_logger["grad_norm", "max"]
         bad_grad_count = self.tracking_logger["has_bad_grad", "sum"]
         tps = self.tracking_logger["num_tokens", "sum"] / self.tracking_logger["step_duration", "sum"] * self.world_size
@@ -406,30 +432,44 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
         max_trainable_ops_bwd_time = self.tracking_logger["time/trainable_ops_bwd", "max"]
 
         if dist.get_rank() == 0:
+            # Format learning rate display
+            if "lr" in lr_metrics:
+                lr_display = f"LR: {lr_metrics['lr']:.2e}"
+            else:
+                lr_values = [f"{lr:.2e}" for key, lr in sorted(lr_metrics.items())]
+                lr_display = f"LRs: [{', '.join(lr_values)}]"
+
             logger.info(
-                f"Step {self.step:6d} | Loss: {avg_loss:.4f} | LR: {avg_lr:.2e} | GradNorm: {max_grad_norm:.2f} | "
+                f"Step {self.step:6d} | Loss: {avg_loss:.4f} | {lr_display} | GradNorm: {max_grad_norm:.2f} | "
                 f"TPS: {human_readable_number(tps)} | Data: {max_data_time:.3f}s | Frozen: {max_frozen_ops_time:.3f}s | "
                 f"TrainableFwd: {max_trainable_ops_fwd_time:.3f}s | TrainableBwd: {max_trainable_ops_bwd_time:.3f}s"
             )
-            self.wandb_logger.log(
-                {
-                    "train/loss": avg_loss,
-                    "train/learning_rate": avg_lr,
-                    "train/gradient_norm": max_grad_norm,
-                    "train/bad_grad_count": bad_grad_count,
-                    "train/tps": tps,
-                    "time/data": max_data_time,
-                    "time/frozen_ops": max_frozen_ops_time,
-                    "time/trainable_ops_fwd": max_trainable_ops_fwd_time,
-                    "time/trainable_ops_bwd": max_trainable_ops_bwd_time,
-                },
-                step=self.step,
-            )
+
+            # Prepare wandb metrics
+            wandb_metrics = {
+                "train/loss": avg_loss,
+                "train/gradient_norm": max_grad_norm,
+                "train/bad_grad_count": bad_grad_count,
+                "train/tps": tps,
+                "time/data": max_data_time,
+                "time/frozen_ops": max_frozen_ops_time,
+                "time/trainable_ops_fwd": max_trainable_ops_fwd_time,
+                "time/trainable_ops_bwd": max_trainable_ops_bwd_time,
+            }
+
+            # Add learning rate(s) to wandb metrics
+            if "lr" in lr_metrics:
+                wandb_metrics["train/learning_rate"] = lr_metrics["lr"]
+            else:
+                for key, lr in lr_metrics.items():
+                    wandb_metrics[f"train/learning_rate_{key.split('_')[1]}"] = lr
+
+            self.wandb_logger.log(wandb_metrics, step=self.step)
 
     def in_train_inference(self) -> None:
-        assert (
-            self.latent_fm is not None and self.exp_dir is not None and self.step is not None
-        ), "LatentFM, exp_dir, and step must be provided in training mode"
+        assert self.latent_fm is not None and self.exp_dir is not None and self.step is not None, (
+            "LatentFM, exp_dir, and step must be provided in training mode"
+        )
 
         logger.info("Setting up InferenceOps...")
         inference_ops = InferenceOps(lfm=self.latent_fm)

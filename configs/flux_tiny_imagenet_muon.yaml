@@ -17,8 +17,8 @@ model:
       embedding_dim: 768
       return_datum_lens: true
       # Check the "data" section of this file for the correct paths
-      embeddings_path: "$MINFM_DATA_DIR/imagenet/ilsvrc2012_meta.pt::clip_embeddings"
-      txt_to_label_path: "$MINFM_DATA_DIR/imagenet/ilsvrc2012_meta.pt::txt_to_label"
+      embeddings_path: "/mnt/localssd/data/imagenet/meta.pt::clip_embeddings"
+      txt_to_label_path: "/mnt/localssd/data/imagenet/meta.pt::txt_to_label"
 
   clip_encoder:
     module: "models.vanilla_embedder.VanillaEmbedder"
@@ -27,8 +27,8 @@ model:
       embedding_dim: 768
       return_datum_lens: false
       # Check the "data" section of this file for the correct paths
-      embeddings_path: "$MINFM_DATA_DIR/imagenet/ilsvrc2012_meta.pt::clip_embeddings"
-      txt_to_label_path: "$MINFM_DATA_DIR/imagenet/ilsvrc2012_meta.pt::txt_to_label"
+      embeddings_path: "/mnt/localssd/data/imagenet/meta.pt::clip_embeddings"
+      txt_to_label_path: "/mnt/localssd/data/imagenet/meta.pt::txt_to_label"
 
   patchifier:
     module: "models.patchifier.Patchifier"
@@ -57,7 +57,7 @@ model:
       guidance_embed: false
     fsdp:
       meta_device_init: true
-      shard_size: 1
+      shard_size: 8
       param_dtype: "bf16"
       reduce_dtype: "fp32"
       ac_freq: 0
@@ -107,14 +107,31 @@ trainer:
     ema_decay: 0.999
 
     # Training Schedule
-    max_steps: 1000_000
-    warmup_steps: 1000
+    max_steps: 1_000_000
+    warmup_steps: 200
 
-    # AdamW Optimizer Settings
+    # Optimizer Settings
     adam_max_lr: 0.0003 # Maximum learning rate for AdamW optimizer
+    adam_betas: [ 0.9, 0.95 ] # Beta coefficients for AdamW momentum terms [beta1, beta2]
+    use_muon: true
+    muon_max_lr: 0.02
+    muon_mu: 0.95
+    muon_adjust_lr: "spectral_norm"
+    muon_param_patterns:
+    - "double_blocks.*.txt_attn.qkv.weight"
+    - "double_blocks.*.txt_attn.proj.weight"
+    - "double_blocks.*.img_attn.qkv.weight"
+    - "double_blocks.*.img_attn.proj.weight"
+    - "double_blocks.*.txt_mlp.*.weight"
+    - "double_blocks.*.img_mlp.*.weight"
+    - "single_blocks.*.linear1.weight"
+    - "single_blocks.*.linear2.weight"
+    # Note: Excludes txt_in, img_in, final_layer.linear (input/output projections)
+    # Note: Exclude modulation weights
+    # Note: Excludes all biases by explicitly matching only .weight
+
     min_lr_ratio: 0.1 # Minimum learning rate for cosine decay schedule
     weight_decay: 0.0 # L2 regularization weight decay coefficient
-    adam_betas: [ 0.9, 0.95 ] # Beta coefficients for AdamW momentum terms [beta1, beta2]
 
     # Gradient accumulation settings
     total_batch_size: 1024
@@ -128,12 +145,12 @@ trainer:
     init_ckpt: null # Optional: "path/to/checkpoint"
     init_ckpt_load_plan: "ckpt_model:mem_model,ckpt_ema:mem_ema,ckpt_optimizer:mem_optimizer,ckpt_scheduler:mem_scheduler,ckpt_step:mem_step"
     ckpt_freq: 2000
-    exp_dir: "./experiments/flux_tiny_imagenet"
+    exp_dir: "./experiments/flux_tiny_imagenet_muon"
 
     # Logging Settings
     wandb_mode: "disabled" # online, offline, or disabled (disabled = no wandb logging)
     wandb_project: "minFM"
-    wandb_name: "flux_tiny_imagenet" # Optional: experiment name, defaults to wandb auto-naming
+    wandb_name: "flux_tiny_imagenet_muon" # Optional: experiment name, defaults to wandb auto-naming
     # wandb_entity: <your-wandb-entity> # Optional: wandb entity/organization
     # wandb_host: <your-wandb-host> # Optional: wandb host # Optional: Hostname for custom-hosted setup
     log_freq: 20
@@ -197,4 +214,3 @@ data:
     data_root_dir: "$MINFM_DATA_DIR/imagenet"
     image_metas_path: "$MINFM_DATA_DIR/imagenet/ilsvrc2012_meta.pt::image_metas"
     label_to_txt_path: "$MINFM_DATA_DIR/imagenet/ilsvrc2012_meta.pt::label_to_txt"
-    use_precomputed_latents: true

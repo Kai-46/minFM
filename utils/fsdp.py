@@ -64,9 +64,9 @@ def apply_ac(model: nn.Module, ac_freq: int, blocks_attr: str | list[str] = "blo
     for attr in blocks_attr:
         # Retrieve container of blocks (e.g.​ transformer layers)
         blocks_container: nn.ModuleDict | nn.ModuleList = attrgetter(attr)(model)
-        assert isinstance(
-            blocks_container, nn.ModuleDict | nn.ModuleList
-        ), f"model.{attr} must be a nn.ModuleDict or nn.ModuleList, but got {type(blocks_container)}"
+        assert isinstance(blocks_container, nn.ModuleDict | nn.ModuleList), (
+            f"model.{attr} must be a nn.ModuleDict or nn.ModuleList, but got {type(blocks_container)}"
+        )
 
         logger.info(
             f"Applying activation checkpointing to {attr} of {type(model)} with ac_freq {ac_freq}; number of blocks: {len(blocks_container)}"
@@ -135,9 +135,9 @@ def apply_fsdp(
     block_list = []
     for attr in blocks_attr:
         blocks_container: nn.ModuleDict | nn.ModuleList = attrgetter(attr)(model)
-        assert isinstance(
-            blocks_container, nn.ModuleDict | nn.ModuleList
-        ), f"model.{blocks_attr} must be a nn.ModuleDict or nn.ModuleList, but got {type(blocks_container)}"
+        assert isinstance(blocks_container, nn.ModuleDict | nn.ModuleList), (
+            f"model.{blocks_attr} must be a nn.ModuleDict or nn.ModuleList, but got {type(blocks_container)}"
+        )
         logger.info(
             f"Applying FSDP to {attr} of {type(model)}, number of blocks: {len(blocks_container)}, "
             f"blocks_per_shard_group={blocks_per_shard_group}, "
@@ -196,6 +196,9 @@ def apply_fsdp(
 
     # Apply FSDP to the root model
     fully_shard(model, **fsdp_config, reshard_after_forward=reshard_after_forward)  # type: ignore
+
+    # Hacky: store fsdp_config in the model
+    model.fsdp_config = fsdp_config
 
     # if reshard_after_forward_policy == "always":
     #     from torch.distributed.fsdp._fully_shard._fully_shard import FSDPModule
@@ -312,9 +315,9 @@ def dist_model_setup(
     if shard_size is None:
         shard_size = dist.get_world_size()
 
-    assert (
-        dist.get_world_size() % shard_size == 0
-    ), f"world_size {dist.get_world_size()} must be divisible by shard_size {shard_size}"
+    assert dist.get_world_size() % shard_size == 0, (
+        f"world_size {dist.get_world_size()} must be divisible by shard_size {shard_size}"
+    )
     dp_mesh = init_device_mesh(
         "cuda",
         (dist.get_world_size() // shard_size, shard_size),
