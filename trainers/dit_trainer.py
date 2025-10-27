@@ -339,7 +339,7 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
         print_data_summary: bool = False,
         txt_drop_prob: float = 0.1,
     ) -> torch.Tensor:
-        accum_batch_size = 0
+        n_accum_steps = 0
         while True:
             # Get next batch (FMDataContext) - infinite iterator, no StopIteration
             with tracking_logger.log_time("time/data"):
@@ -357,14 +357,20 @@ class DiTTrainer(ConfigurableModule[DITTrainerParams]):
             with tracking_logger.log_time("time/trainable_ops_fwd"):
                 fm_data_context = self.trainable_ops(fm_data_context)
 
+            global_batch_size = self.trainable_ops.global_batch_size
+            if total_batch_size <= 0:
+                target_n_accum_steps = 1
+            else:
+                target_n_accum_steps = (total_batch_size + global_batch_size - 1) // global_batch_size
+
             if not skip_backward:
                 with tracking_logger.log_time("time/trainable_ops_bwd"):
-                    fm_data_context.loss.backward()
+                    (fm_data_context.loss / target_n_accum_steps).backward()
 
             tracking_logger.log({"loss_vec": fm_data_context.loss_vec, "num_tokens": fm_data_context.num_tokens})
 
-            accum_batch_size += self.trainable_ops.global_batch_size
-            if accum_batch_size >= total_batch_size:
+            n_accum_steps += 1
+            if n_accum_steps >= target_n_accum_steps:
                 break
 
     @torch.no_grad()
