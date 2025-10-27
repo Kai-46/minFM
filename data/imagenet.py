@@ -2,13 +2,12 @@
 ImageNet Data Module
 
 This module provides a complete data loading pipeline for ImageNet dataset with
-aspect ratio bucketing and efficient batching. It includes dataset classes,
-data loaders, and samplers optimized for training vision models.
+efficient batching. It includes dataset classes, data loaders, and samplers optimized for training vision models.
 
 Classes:
     ImagenetDataModuleParams: Configuration parameters for the data module
     ImagenetDataModule: Main data module class that manages datasets and loaders
-    ImagenetDataset: Dataset class for ImageNet with aspect ratio bucketing
+    ImagenetDataset: Dataset class for ImageNet
     ImagenetDataSampler: Custom sampler for efficient batch sampling
 """
 
@@ -70,9 +69,15 @@ class ImagenetWrapper:
                 self._iterator = None
                 raise StopIteration from None
 
-        return FMDataContext(
-            raw_texts=data_raw["raw_texts"],
-            raw_images=data_raw["raw_images"],
+        if "latents" in data_raw:
+            return FMDataContext(
+                raw_texts=data_raw["raw_texts"],
+                raw_latents=data_raw["latents"],
+            )
+        else:
+            return FMDataContext(
+                raw_texts=data_raw["raw_texts"],
+                raw_images=data_raw["raw_images"],
         )
 
 
@@ -92,23 +97,30 @@ class ImagenetDataModuleParams(BaseParams):
     data_root_dir: Path = Path("<MINFM_DATA_DIR>/imagenet")
     image_metas_path: str = "<MINFM_DATA_DIR>/imagenet/ilsvrc2012_meta.pt::image_metas"
     label_to_txt_path: str = "<MINFM_DATA_DIR>/imagenet/ilsvrc2012_meta.pt::label_to_txt"
+    use_precomputed_latents: bool = False
 
 
 def imagenet_collate_fn(batch: list[dict]) -> dict:
-    return {
-        "raw_images": rearrange(torch.stack([item["raw_images"] for item in batch]), "b c h w -> b c 1 h w"),
+    ret = {
         "raw_texts": [item["raw_texts"] for item in batch],
+        "file_stems": [item["file_stems"] for item in batch],
     }
+
+    if "raw_images" in batch[0]:
+        ret["raw_images"] = rearrange(torch.stack([item["raw_images"] for item in batch]), "b c h w -> b c 1 h w")
+
+    if "latents" in batch[0]:
+        ret["latents"] = rearrange(torch.stack([item["latents"] for item in batch]), "b c h w -> b c 1 h w")
+
+    return ret
 
 
 class ImagenetDataModule(ConfigurableModule[ImagenetDataModuleParams]):
     """
-    Main data module for ImageNet dataset with aspect ratio bucketing.
+    Main data module for ImageNet dataset.
 
     This class manages the creation and configuration of ImageNet datasets
-    and data loaders for both training and validation splits. It implements
-    aspect ratio bucketing to improve training efficiency by grouping images
-    with similar aspect ratios together.
+    and data loaders for both training and validation splits.
 
     Attributes:
         params: Configuration parameters
@@ -145,6 +157,7 @@ class ImagenetDataModule(ConfigurableModule[ImagenetDataModuleParams]):
                 image_metas_path=params.image_metas_path,
                 label_to_txt_path=params.label_to_txt_path,
                 split=split,
+                use_precomputed_latents=params.use_precomputed_latents,
             )
             for split in ["train", "val"]
         }
@@ -228,10 +241,7 @@ class ImagenetDataModule(ConfigurableModule[ImagenetDataModuleParams]):
 
 class ImagenetDataset(Dataset):
     """
-    ImageNet dataset with aspect ratio bucketing.
-
-    This dataset loads ImageNet images and groups them into aspect ratio buckets.
-    Images are resized and cropped to fit within their assigned buckets while maintaining aspect ratios.
+    ImageNet dataset.
 
     Attributes:
         split: Dataset split ('train' or 'val')
@@ -249,6 +259,7 @@ class ImagenetDataset(Dataset):
         label_to_txt_path: str,
         resolution: int = 256,
         p_horizon_flip: float = 0.5,
+        use_precomputed_latents: bool = False,
         split: str = "train",
     ) -> None:
         """
@@ -267,7 +278,7 @@ class ImagenetDataset(Dataset):
         self.data_root_dir = data_root_dir
         self.data_meta = load_pt_data_from_path(image_metas_path)[split]
         self.label_to_txt = load_pt_data_from_path(label_to_txt_path)
-
+        self.use_precomputed_latents = use_precomputed_latents
         def crop_to_square(image: Image.Image) -> Image.Image:
             width, height = image.size
             min_dim = min(width, height)
@@ -300,31 +311,35 @@ class ImagenetDataset(Dataset):
             Dictionary containing:
                 - raw_images: Tensor of shape (3, H, W) with pixel values in [-1, 1]
                 - raw_texts: String label for the image
+                - file_stems: String stem of the image file
 
-        The image is loaded, cropped to fit its aspect ratio bucket, and resized
-        to the bucket dimensions while maintaining the aspect ratio.
         """
         data_meta = self.data_meta[idx]
-        img_path = Path(self.data_root_dir) / self.split / data_meta["img_path"]
+        raw_img_path = Path(data_meta["img_path"])
         label = int(data_meta["label"])
         txt = self.label_to_txt[label]
 
-        if not img_path.exists():
-            # In case download from huggingface, the image path does not have subfolders
-            img_path = (
-                Path(self.data_root_dir)
-                / "extracted"
-                / self.split
-                / f"{img_path.stem}_{img_path.parent.name}{img_path.suffix}"
-            )
+        ret = { "raw_texts": txt, "file_stems": raw_img_path.stem }
+        if self.use_precomputed_latents:
+            latent_path = Path(self.data_root_dir) / "vae_latents" / self.split / f"{raw_img_path.stem}_{raw_img_path.parent.name}.pt"
+            latent = torch.load(latent_path)
+            ret["latents"] = latent
+        else:
+            img_path = Path(self.data_root_dir) / self.split / data_meta["img_path"]
+            if not img_path.exists():
+                # In case download from huggingface, the image path does not have subfolders
+                img_path = (
+                    Path(self.data_root_dir)
+                    / "extracted"
+                    / self.split
+                    / f"{img_path.stem}_{img_path.parent.name}{img_path.suffix}"
+                )
 
-        image = Image.open(img_path).convert("RGB")
-        image = self.image_transforms(image)
+            image = Image.open(img_path).convert("RGB")
+            image = self.image_transforms(image)
+            ret["raw_images"] = image.clip(-1.0, 1.0)
 
-        return {
-            "raw_images": image.clip(-1.0, 1.0),
-            "raw_texts": txt,
-        }
+        return ret
 
     def __len__(self) -> int:
         """

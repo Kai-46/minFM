@@ -197,3 +197,4 @@ data:
     data_root_dir: "$MINFM_DATA_DIR/imagenet"
     image_metas_path: "$MINFM_DATA_DIR/imagenet/ilsvrc2012_meta.pt::image_metas"
     label_to_txt_path: "$MINFM_DATA_DIR/imagenet/ilsvrc2012_meta.pt::label_to_txt"
+    use_precomputed_latents: true

@@ -33,6 +33,7 @@ class FMDataContext:
     Attributes:
         raw_texts: List of text prompts as strings
         raw_images: Raw image tensors (b, c, h, w)
+        raw_latents: Raw latent tensors (b, c, f, h // p, w // p)
         txt: Text embeddings (l1+l2+...+ln, d_txt)
         txt_datum_lens: Length of each text sequence (n,)
         txt_position_ids: Position IDs for text tokens (l1+l2+...+ln, d_position)
@@ -47,6 +48,7 @@ class FMDataContext:
     """Filled by Dataloader"""
     raw_texts: list[str] | None = None
     raw_images: torch.Tensor | None = None  # (n, c, f, h, w)
+    raw_latents: torch.Tensor | None = None  # (n, c, f, h // p, w // p)
 
     """Filled by FrozenOps"""
     """Frozen T5 Ops"""
@@ -280,13 +282,17 @@ class FrozenOps:
                 data_batch.vec = self.lfm.clip_encoder(data_batch.raw_texts)
 
         """Encode image into embeddings (in-place)."""
-        if data_batch.raw_images is not None and self.lfm.patchifier is not None and self.lfm.vae is not None:
-            data_batch.raw_images = data_batch.raw_images.to(device=device)
-            with fwd_only_mode(self.lfm.vae):
-                latents = self.lfm.vae.encode(data_batch.raw_images)
+        if self.lfm.patchifier is not None and self.lfm.vae is not None:
+            if data_batch.raw_latents is None:
+                assert data_batch.raw_images is not None, "raw_images must be provided"
+                data_batch.raw_images = data_batch.raw_images.to(device=device)
+                with fwd_only_mode(self.lfm.vae):
+                    data_batch.raw_latents = self.lfm.vae.encode(data_batch.raw_images)
+            else:
+                data_batch.raw_latents = data_batch.raw_latents.to(device=device)
 
             data_batch.img_clean, data_batch.img_datum_lens, data_batch.img_position_ids = self.lfm.patchifier.patchify(
-                latents
+                data_batch.raw_latents
             )
             assert (
                 data_batch.img_position_ids.shape[1] == n_position_axes

@@ -33,6 +33,9 @@ export MINFM_DATA_DIR="<minfm-data-dir>"
 # Requires ~210G of storage in total.
 export HF_TOKEN="<your-hf-token>"
 bash ./scripts/cache_everything.sh
+
+# Run below to precompute the VAE latents.
+torchrun --nproc_per_node=8 scripts/vae_precompute.py --config configs/flux_tiny_imagenet.yaml --output_dir $MINFM_DATA_DIR/imagenet/vae_latents
 ```
 
 For training, the easiest way to get started is using the provided training script:
